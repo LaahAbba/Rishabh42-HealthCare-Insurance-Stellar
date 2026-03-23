@@ -98,6 +98,33 @@ pub struct TokenAllocation {
 }
 
 #[contracttype]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+pub enum PaymentScheduleType {
+    Interval = 0,
+    CalendarMonthly = 1,
+    CalendarQuarterly = 2,
+    CalendarYearly = 3,
+}
+
+#[contracttype]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+pub enum HolidayHandling {
+    ProcessImmediately = 0,
+    PostponeToNextBusinessDay = 1,
+    PostponeToPreviousBusinessDay = 2,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CalendarSchedule {
+    pub schedule_type: PaymentScheduleType,
+    pub day_of_month: u8, // 1-31 for monthly/quarterly/yearly
+    pub month: Option<u8>, // 1-12 for yearly, None for monthly/quarterly
+    pub holiday_handling: HolidayHandling,
+    pub weekend_handling: HolidayHandling,
+}
+
+#[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PremiumDrip {
     pub id: u64,
@@ -114,6 +141,10 @@ pub struct PremiumDrip {
     pub created: u64,
     pub auto_rebalance: bool,
     pub slippage_tolerance: u32, // Basis points
+    pub calendar_schedule: Option<CalendarSchedule>,
+    pub skip_next_payment: bool,
+    pub advance_payment_allowed: bool,
+    pub max_advance_days: u32,
 }
 
 #[contracttype]
@@ -341,6 +372,13 @@ pub enum HealthcareDripsError {
     InsufficientLiquidity = 30,
     ConversionFailed = 31,
     RebalanceFailed = 32,
+    InvalidCalendarSchedule = 33,
+    PaymentAlreadySkipped = 34,
+    AdvancePaymentNotAllowed = 35,
+    InvalidAdvancePeriod = 36,
+    PaymentNotDue = 37,
+    HolidayPostponementFailed = 38,
+    WeekendPostponementFailed = 39,
 }
 
 // ========== CONTRACT ==========
@@ -422,6 +460,9 @@ impl HealthcareDrips {
         interval: u64,
         auto_rebalance: bool,
         slippage_tolerance: u32,
+        calendar_schedule: Option<CalendarSchedule>,
+        advance_payment_allowed: bool,
+        max_advance_days: u32,
     ) -> Result<u64, HealthcareDripsError> {
         if premium_amount <= 0 {
             return Err(HealthcareDripsError::InvalidAmount);
@@ -437,8 +478,33 @@ impl HealthcareDrips {
             return Err(HealthcareDripsError::InvalidTokenAllocation);
         }
         
+        // Validate calendar schedule if provided
+        if let Some(ref schedule) = calendar_schedule {
+            if schedule.day_of_month < 1 || schedule.day_of_month > 31 {
+                return Err(HealthcareDripsError::InvalidCalendarSchedule);
+            }
+            
+            if let Some(month) = schedule.month {
+                if month < 1 || month > 12 {
+                    return Err(HealthcareDripsError::InvalidCalendarSchedule);
+                }
+            }
+            
+            // Validate schedule type and month combination
+            if schedule.schedule_type == PaymentScheduleType::CalendarYearly && schedule.month.is_none() {
+                return Err(HealthcareDripsError::InvalidCalendarSchedule);
+            }
+        }
+        
         let next_id = Self::get_next_drip_id(env);
         let current_time = env.ledger().timestamp();
+        
+        // Calculate next payment based on schedule type
+        let next_payment = if let Some(ref schedule) = calendar_schedule {
+            Self::calculate_next_calendar_payment(env, schedule, current_time)
+        } else {
+            current_time + interval
+        };
         
         let drip = PremiumDrip {
             id: next_id,
@@ -449,12 +515,16 @@ impl HealthcareDrips {
             token_allocations: token_allocations.clone(),
             interval,
             last_payment: current_time,
-            next_payment: current_time + interval,
+            next_payment,
             active: true,
             total_paid: 0,
             created: current_time,
             auto_rebalance,
             slippage_tolerance,
+            calendar_schedule,
+            skip_next_payment: false,
+            advance_payment_allowed,
+            max_advance_days,
         };
         
         // Store drip
@@ -478,6 +548,7 @@ impl HealthcareDrips {
     pub fn process_premium_payment(
         env: &Env,
         drip_id: u64,
+        caller: Address,
     ) -> Result<(), HealthcareDripsError> {
         let drip_key = Symbol::new(&env, &format!("drip_{}", drip_id));
         let mut drip: PremiumDrip = env.storage().instance()
@@ -488,15 +559,42 @@ impl HealthcareDrips {
             return Err(HealthcareDripsError::IssueNotActive);
         }
         
-        let current_time = env.ledger().timestamp();
-        if current_time < drip.next_payment {
-            return Err(HealthcareDripsError::InvalidAmount); // Payment not due yet
+        // Check authorization
+        if drip.insurer != caller {
+            return Err(HealthcareDripsError::Unauthorized);
         }
+        
+        let current_time = env.ledger().timestamp();
+        
+        // Check if payment is skipped
+        if drip.skip_next_payment {
+            // Reset skip flag and calculate next payment
+            drip.skip_next_payment = false;
+            drip.next_payment = Self::calculate_next_payment_date(env, &drip, current_time);
+            env.storage().instance().set(&drip_key, &drip);
+            return Ok(());
+        }
+        
+        // Check if payment is due (with advance payment support)
+        let is_advance_payment = current_time < drip.next_payment && 
+                                drip.advance_payment_allowed && 
+                                (drip.next_payment - current_time) <= (drip.max_advance_days as u64 * 86400);
+        
+        if !is_advance_payment && current_time < drip.next_payment {
+            return Err(HealthcareDripsError::PaymentNotDue);
+        }
+        
+        // Handle weekend/holiday postponement if using calendar schedule
+        let adjusted_payment_time = if let Some(ref schedule) = drip.calendar_schedule {
+            Self::adjust_for_weekends_and_holidays(env, current_time, schedule)?
+        } else {
+            current_time
+        };
         
         // In a real implementation, this would transfer tokens
         // For now, we'll just update the state
-        drip.last_payment = current_time;
-        drip.next_payment = current_time + drip.interval;
+        drip.last_payment = adjusted_payment_time;
+        drip.next_payment = Self::calculate_next_payment_date(env, &drip, adjusted_payment_time);
         drip.total_paid += drip.premium_amount;
         
         env.storage().instance().set(&drip_key, &drip);
@@ -519,6 +617,89 @@ impl HealthcareDrips {
         }
         
         drip.active = false;
+        env.storage().instance().set(&drip_key, &drip);
+        
+        Ok(())
+    }
+    
+    pub fn skip_next_premium_payment(
+        env: &Env,
+        drip_id: u64,
+        caller: Address,
+    ) -> Result<(), HealthcareDripsError> {
+        let drip_key = Symbol::new(&env, &format!("drip_{}", drip_id));
+        let mut drip: PremiumDrip = env.storage().instance()
+            .get(&drip_key)
+            .ok_or(HealthcareDripsError::InvalidIssueId)?;
+        
+        if drip.patient != caller && drip.insurer != caller {
+            return Err(HealthcareDripsError::Unauthorized);
+        }
+        
+        if !drip.active {
+            return Err(HealthcareDripsError::IssueNotActive);
+        }
+        
+        if drip.skip_next_payment {
+            return Err(HealthcareDripsError::PaymentAlreadySkipped);
+        }
+        
+        drip.skip_next_payment = true;
+        env.storage().instance().set(&drip_key, &drip);
+        
+        Ok(())
+    }
+    
+    pub fn enable_advance_payments(
+        env: &Env,
+        drip_id: u64,
+        max_advance_days: u32,
+        caller: Address,
+    ) -> Result<(), HealthcareDripsError> {
+        let drip_key = Symbol::new(&env, &format!("drip_{}", drip_id));
+        let mut drip: PremiumDrip = env.storage().instance()
+            .get(&drip_key)
+            .ok_or(HealthcareDripsError::InvalidIssueId)?;
+        
+        if drip.insurer != caller {
+            return Err(HealthcareDripsError::Unauthorized);
+        }
+        
+        if !drip.active {
+            return Err(HealthcareDripsError::IssueNotActive);
+        }
+        
+        if max_advance_days > 30 { // Maximum 30 days advance
+            return Err(HealthcareDripsError::InvalidAdvancePeriod);
+        }
+        
+        drip.advance_payment_allowed = true;
+        drip.max_advance_days = max_advance_days;
+        env.storage().instance().set(&drip_key, &drip);
+        
+        Ok(())
+    }
+    
+    pub fn disable_advance_payments(
+        env: &Env,
+        drip_id: u64,
+        caller: Address,
+    ) -> Result<(), HealthcareDripsError> {
+        let drip_key = Symbol::new(&env, &format!("drip_{}", drip_id));
+        let mut drip: PremiumDrip = env.storage().instance()
+            .get(&drip_key)
+            .ok_or(HealthcareDripsError::InvalidIssueId)?;
+        
+        if drip.insurer != caller {
+            return Err(HealthcareDripsError::Unauthorized);
+        }
+        
+        if !drip.active {
+            return Err(HealthcareDripsError::IssueNotActive);
+        }
+        
+        drip.advance_payment_allowed = false;
+        drip.max_advance_days = 0;
         env.storage().instance().set(&drip_key, &drip);
         
         Ok(())
@@ -1627,7 +1808,7 @@ impl HealthcareDrips {
         
         let current_time = env.ledger().timestamp();
         if current_time < drip.next_payment {
-            return Err(HealthcareDripsError::InvalidAmount); // Payment not due yet
+            return Err(HealthcareDripsError::PaymentNotDue); // Payment not due yet
         }
         
         // Process payment for each token allocation
@@ -1666,11 +1847,194 @@ impl HealthcareDrips {
         
         // Update drip payment schedule
         drip.last_payment = current_time;
-        drip.next_payment = current_time + drip.interval;
+        drip.next_payment = Self::calculate_next_payment_date(env, &drip, current_time);
         drip.total_paid += drip.premium_amount;
         
         env.storage().instance().set(&drip_key, &drip);
         
         Ok(())
+    }
+    
+    // ========== CALENDAR SCHEDULING HELPERS ==========
+    
+    /// Calculate the next payment date based on calendar schedule
+    fn calculate_next_calendar_payment(env: &Env, schedule: &CalendarSchedule, from_time: u64) -> u64 {
+        let current_timestamp = from_time;
+        let mut next_payment = current_timestamp;
+        
+        match schedule.schedule_type {
+            PaymentScheduleType::Interval => {
+                // Not used here, handled elsewhere
+                next_payment = current_timestamp;
+            }
+            PaymentScheduleType::CalendarMonthly => {
+                next_payment = Self::get_next_monthly_payment(env, current_timestamp, schedule.day_of_month);
+            }
+            PaymentScheduleType::CalendarQuarterly => {
+                next_payment = Self::get_next_quarterly_payment(env, current_timestamp, schedule.day_of_month);
+            }
+            PaymentScheduleType::CalendarYearly => {
+                let month = schedule.month.unwrap_or(1);
+                next_payment = Self::get_next_yearly_payment(env, current_timestamp, schedule.day_of_month, month);
+            }
+        }
+        
+        next_payment
+    }
+    
+    /// Calculate next payment date for a drip (handles both interval and calendar scheduling)
+    fn calculate_next_payment_date(env: &Env, drip: &PremiumDrip, from_time: u64) -> u64 {
+        if let Some(ref schedule) = drip.calendar_schedule {
+            Self::calculate_next_calendar_payment(env, schedule, from_time)
+        } else {
+            from_time + drip.interval
+        }
+    }
+    
+    /// Get next monthly payment date for a specific day of month
+    fn get_next_monthly_payment(env: &Env, current_time: u64, day_of_month: u8) -> u64 {
+        // Simplified implementation - in real would use proper date libraries
+        // For demo, assume 30 days in month and calculate next occurrence
+        let seconds_per_day = 86400u64;
+        let days_in_month = 30u64;
+        
+        // Calculate days to add to reach the target day
+        let current_day = ((current_time / seconds_per_day) % days_in_month) + 1;
+        let target_day = day_of_month as u64;
+        
+        let days_to_add = if target_day >= current_day {
+            target_day - current_day
+        } else {
+            days_in_month - current_day + target_day
+        };
+        
+        current_time + (days_to_add * seconds_per_day)
+    }
+    
+    /// Get next quarterly payment date for a specific day of month
+    fn get_next_quarterly_payment(env: &Env, current_time: u64, day_of_month: u8) -> u64 {
+        // Simplified - assume quarterly every 90 days
+        let seconds_per_day = 86400u64;
+        let days_in_quarter = 90u64;
+        
+        let current_day = ((current_time / seconds_per_day) % days_in_quarter) + 1;
+        let target_day = day_of_month as u64;
+        
+        let days_to_add = if target_day >= current_day {
+            target_day - current_day
+        } else {
+            days_in_quarter - current_day + target_day
+        };
+        
+        current_time + (days_to_add * seconds_per_day)
+    }
+    
+    /// Get next yearly payment date for a specific day and month
+    fn get_next_yearly_payment(env: &Env, current_time: u64, day_of_month: u8, month: u8) -> u64 {
+        // Simplified - assume 365 days in year
+        let seconds_per_day = 86400u64;
+        let days_in_year = 365u64;
+        
+        // Calculate day of year for target date
+        let target_day_of_year = (month as u64 - 1) * 30 + day_of_month as u64; // Simplified 30 days per month
+        let current_day_of_year = (current_time / seconds_per_day) % days_in_year;
+        
+        let days_to_add = if target_day_of_year >= current_day_of_year {
+            target_day_of_year - current_day_of_year
+        } else {
+            days_in_year - current_day_of_year + target_day_of_year
+        };
+        
+        current_time + (days_to_add * seconds_per_day)
+    }
+    
+    /// Adjust payment time for weekends and holidays
+    fn adjust_for_weekends_and_holidays(
+        env: &Env,
+        payment_time: u64,
+        schedule: &CalendarSchedule,
+    ) -> Result<u64, HealthcareDripsError> {
+        let mut adjusted_time = payment_time;
+        
+        // Check if payment time falls on weekend (Saturday=6, Sunday=0 in Unix timestamp)
+        let day_of_week = ((adjusted_time / 86400) + 4) % 7; // Unix epoch started on Thursday
+        
+        if day_of_week == 0 || day_of_week == 6 { // Sunday or Saturday
+            adjusted_time = match schedule.weekend_handling {
+                HolidayHandling::ProcessImmediately => adjusted_time,
+                HolidayHandling::PostponeToNextBusinessDay => {
+                    // Postpone to Monday
+                    let days_to_add = if day_of_week == 0 { 1 } else { 2 }; // Sunday->Monday, Saturday->Monday
+                    adjusted_time + (days_to_add * 86400)
+                }
+                HolidayHandling::PostponeToPreviousBusinessDay => {
+                    // Postpone to Friday
+                    let days_to_subtract = if day_of_week == 0 { 2 } else { 1 }; // Sunday->Friday, Saturday->Friday
+                    adjusted_time - (days_to_subtract * 86400)
+                }
+            };
+        }
+        
+        // Check for holidays (simplified - in real implementation would use holiday calendar)
+        if Self::is_holiday(env, adjusted_time) {
+            adjusted_time = match schedule.holiday_handling {
+                HolidayHandling::ProcessImmediately => adjusted_time,
+                HolidayHandling::PostponeToNextBusinessDay => {
+                    // Find next business day
+                    Self::find_next_business_day(env, adjusted_time)
+                }
+                HolidayHandling::PostponeToPreviousBusinessDay => {
+                    // Find previous business day
+                    Self::find_previous_business_day(env, adjusted_time)
+                }
+            };
+        }
+        
+        Ok(adjusted_time)
+    }
+    
+    /// Check if a given timestamp falls on a holiday (simplified implementation)
+    fn is_holiday(env: &Env, timestamp: u64) -> bool {
+        // Simplified holiday detection - in real implementation would use comprehensive holiday calendar
+        let day_of_year = ((timestamp / 86400) % 365) + 1;
+        
+        // Sample holidays (day numbers are simplified)
+        match day_of_year {
+            1   => true,  // New Year's Day
+            365 => true,  // December 31st (simplified)
+            180 => true,  // July 4th (simplified)
+            300 => true,  // October 31st (simplified)
+            _   => false,
+        }
+    }
+    
+    /// Find the next business day (non-weekend, non-holiday)
+    fn find_next_business_day(env: &Env, from_time: u64) -> u64 {
+        let mut next_day = from_time + 86400; // Start from tomorrow
+        
+        loop {
+            let day_of_week = ((next_day / 86400) + 4) % 7;
+            if day_of_week != 0 && day_of_week != 6 && !Self::is_holiday(env, next_day) {
+                break;
+            }
+            next_day += 86400;
+        }
+        
+        next_day
+    }
+    
+    /// Find the previous business day (non-weekend, non-holiday)
+    fn find_previous_business_day(env: &Env, from_time: u64) -> u64 {
+        let mut prev_day = from_time - 86400; // Start from yesterday
+        
+        loop {
+            let day_of_week = ((prev_day / 86400) + 4) % 7;
+            if day_of_week != 0 && day_of_week != 6 && !Self::is_holiday(env, prev_day) {
+                break;
+            }
+            prev_day -= 86400;
+        }
+        
+        prev_day
     }
 }
