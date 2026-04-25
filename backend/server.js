@@ -15,6 +15,12 @@ const claimsRoutes = require('./routes/claims');
 const appointmentsRoutes = require('./routes/appointments');
 const paymentsRoutes = require('./routes/payments');
 const contributorVerificationRoutes = require('./routes/contributorVerification');
+const notificationsRoutes = require('./routes/notifications');
+const notificationPreferencesRoutes = require('./routes/notificationPreferences');
+const notificationAnalyticsRoutes = require('./routes/notificationAnalytics');
+
+const NotificationEngine = require('./services/notifications/NotificationEngine');
+const QueueProcessor     = require('./services/notifications/QueueProcessor');
 
 
 const { initializeDatabase } = require('./database/init');
@@ -65,6 +71,11 @@ app.use('/api/appointments', authenticateToken, cacheMiddleware, appointmentsRou
 app.use('/api/payments', authenticateToken, cacheMiddleware, paymentsRoutes);
 app.use('/api/contributor', authenticateToken, contributorVerificationRoutes);
 
+// ── Notification system ──────────────────────────────────────────────────
+app.use('/api/notifications/preferences',  authenticateToken, notificationPreferencesRoutes);
+app.use('/api/notifications/analytics',    authenticateToken, notificationAnalyticsRoutes);
+app.use('/api/notifications',              authenticateToken, notificationsRoutes);
+
 
 app.get('/api/health', (req, res) => {
   res.json({ 
@@ -76,12 +87,19 @@ app.get('/api/health', (req, res) => {
 
 io.on('connection', (socket) => {
   console.log('Client connected:', socket.id);
-  
+
+  // Legacy patient room (kept for backward compatibility)
   socket.on('join-patient-room', (patientId) => {
     socket.join(`patient-${patientId}`);
-    console.log(`Socket ${socket.id} joined room for patient ${patientId}`);
+    console.log(`Socket ${socket.id} joined patient room ${patientId}`);
   });
-  
+
+  // User room — used by notification system for real-time delivery
+  socket.on('join-user-room', (userId) => {
+    socket.join(`user-${userId}`);
+    console.log(`Socket ${socket.id} joined user room ${userId}`);
+  });
+
   socket.on('disconnect', () => {
     console.log('Client disconnected:', socket.id);
   });
@@ -92,15 +110,34 @@ app.use(errorHandler);
 async function startServer() {
   try {
     await initializeDatabase();
+
+    // Initialise notification engine with the socket.io instance
+    NotificationEngine.getInstance(io);
+
     server.listen(PORT, () => {
       console.log(`🚀 Healthcare API Server running on port ${PORT}`);
       console.log(`📊 Dashboard available at: http://localhost:${PORT}/api/health`);
+
+      // Start queue processor after server is listening
+      QueueProcessor.getInstance().start();
     });
   } catch (error) {
     console.error('Failed to start server:', error);
     process.exit(1);
   }
 }
+
+// Graceful shutdown — stop queue processor before exit
+process.on('SIGTERM', () => {
+  console.log('SIGTERM received — shutting down gracefully');
+  QueueProcessor.getInstance().stop();
+  server.close(() => process.exit(0));
+});
+
+process.on('SIGINT', () => {
+  QueueProcessor.getInstance().stop();
+  server.close(() => process.exit(0));
+});
 
 startServer();
 

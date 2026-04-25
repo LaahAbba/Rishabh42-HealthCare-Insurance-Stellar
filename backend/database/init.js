@@ -1,6 +1,7 @@
 const sqlite3 = require('sqlite3').verbose();
 const path = require('path');
 const fs = require('fs');
+const { runNotificationMigration } = require('./notificationMigration');
 
 const DB_PATH = process.env.DB_PATH || path.join(__dirname, 'healthcare.db');
 
@@ -133,14 +134,6 @@ function initializeDatabase() {
         read BOOLEAN DEFAULT FALSE,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (user_id) REFERENCES users (id)
-      )`,
-
-
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-      )`,
-
-
       )`
     ];
 
@@ -177,15 +170,22 @@ function initializeDatabase() {
                 completedIndexes++;
               }
               if (completedIndexes === indexes.length) {
-                db.close((err) => {
-                  if (err) {
-                    console.error('Error closing database:', err);
+                runNotificationMigration(db)
+                  .then(() => {
+                    db.close((err) => {
+                      if (err) {
+                        console.error('Error closing database:', err);
+                        reject(err);
+                      } else {
+                        console.log('Database initialized successfully');
+                        resolve();
+                      }
+                    });
+                  })
+                  .catch((err) => {
+                    console.error('Notification migration error:', err);
                     reject(err);
-                  } else {
-                    console.log('Database initialized successfully');
-                    resolve();
-                  }
-                });
+                  });
               }
             });
           });
