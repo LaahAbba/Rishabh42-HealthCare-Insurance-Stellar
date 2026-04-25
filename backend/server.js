@@ -15,12 +15,16 @@ const claimsRoutes = require('./routes/claims');
 const appointmentsRoutes = require('./routes/appointments');
 const paymentsRoutes = require('./routes/payments');
 const contributorVerificationRoutes = require('./routes/contributorVerification');
+const fraudDetectionRoutes = require('./routes/fraudDetection');
+const securityRoutes = require('./routes/security');
 
 
 const { initializeDatabase } = require('./database/init');
 const { authenticateToken } = require('./middleware/auth');
 const { cacheMiddleware } = require('./middleware/cache');
 const { errorHandler } = require('./middleware/errorHandler');
+const performanceMonitoringService = require('./services/performanceMonitoringService');
+const threatIntelligenceService = require('./services/threatIntelligenceService');
 
 const app = express();
 const server = createServer(app);
@@ -52,6 +56,9 @@ app.use(cors({
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 
+// Add performance monitoring middleware
+app.use(performanceMonitoringService.apiPerformanceMiddleware());
+
 app.use((req, res, next) => {
   req.io = io;
   next();
@@ -64,6 +71,8 @@ app.use('/api/claims', authenticateToken, cacheMiddleware, claimsRoutes);
 app.use('/api/appointments', authenticateToken, cacheMiddleware, appointmentsRoutes);
 app.use('/api/payments', authenticateToken, cacheMiddleware, paymentsRoutes);
 app.use('/api/contributor', authenticateToken, contributorVerificationRoutes);
+app.use('/api/fraud-detection', authenticateToken, fraudDetectionRoutes);
+app.use('/api/security', securityRoutes);
 
 
 app.get('/api/health', (req, res) => {
@@ -92,14 +101,44 @@ app.use(errorHandler);
 async function startServer() {
   try {
     await initializeDatabase();
+    
+    // Start system monitoring
+    startSystemMonitoring();
+    
     server.listen(PORT, () => {
       console.log(`🚀 Healthcare API Server running on port ${PORT}`);
       console.log(`📊 Dashboard available at: http://localhost:${PORT}/api/health`);
+      console.log(`🔒 Advanced Security API enabled`);
+      console.log(`📈 Performance monitoring active`);
     });
   } catch (error) {
     console.error('Failed to start server:', error);
     process.exit(1);
   }
+}
+
+// Start system monitoring
+function startSystemMonitoring() {
+  // Collect system metrics every 30 seconds
+  setInterval(async () => {
+    try {
+      await performanceMonitoringService.collectSystemMetrics();
+    } catch (error) {
+      console.error('Error collecting system metrics:', error);
+    }
+  }, 30000);
+
+  // Update threat feeds every hour
+  setInterval(async () => {
+    try {
+      await threatIntelligenceService.updateThreatFeeds();
+    } catch (error) {
+      console.error('Error updating threat feeds:', error);
+    }
+  }, 3600000);
+
+  console.log('🔍 System monitoring started');
+  console.log('🛡️  Threat intelligence updates scheduled');
 }
 
 startServer();
