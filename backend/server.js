@@ -166,13 +166,10 @@ async function startServer() {
 
       // Start queue processor after server is listening
       QueueProcessor.getInstance().start();
-    
-    // Start system monitoring
-    startSystemMonitoring();
-    
-    server.listen(PORT, () => {
-      console.log(`🚀 Healthcare API Server running on port ${PORT}`);
-      console.log(`📊 Dashboard available at: http://localhost:${PORT}/api/health`);
+
+      // Start system monitoring
+      startSystemMonitoring();
+
       console.log(`🔒 Advanced Security API enabled`);
       console.log(`📈 Performance monitoring active`);
       console.log(`🤖 AI Recommendation Engine enabled`);
