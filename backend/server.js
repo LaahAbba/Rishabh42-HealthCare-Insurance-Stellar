@@ -27,6 +27,7 @@ const aiRecommendationRoutes = require('./routes/aiRecommendation');
 const iotHealthMonitoringRoutes = require('./routes/iotHealthMonitoring');
 const crossPlatformIntegrationRoutes = require('./routes/crossPlatformIntegration');
 const advancedPaymentsRoutes = require('./routes/advancedPayments');
+const feeConfigRoutes = require('./routes/feeConfigs');
 const insuranceMarketplaceRoutes = require('./routes/insuranceMarketplace');
 const mlModelServingRoutes = require('./routes/mlModelServing');
 const advancedSearchRoutes = require('./routes/advancedSearch');
@@ -100,6 +101,7 @@ app.use('/api/ai', authenticateToken, aiRecommendationRoutes);
 app.use('/api/iot', authenticateToken, iotHealthMonitoringRoutes);
 app.use('/api/integrations', authenticateToken, crossPlatformIntegrationRoutes);
 app.use('/api/advanced-payments', authenticateToken, advancedPaymentsRoutes);
+app.use('/api/fee-configs', authenticateToken, feeConfigRoutes);
 app.use('/api/marketplace', authenticateToken, insuranceMarketplaceRoutes);
 app.use('/api/ml', authenticateToken, mlModelServingRoutes);
 app.use('/api/search', authenticateToken, advancedSearchRoutes);
@@ -168,13 +170,10 @@ async function startServer() {
 
       // Start queue processor after server is listening
       QueueProcessor.getInstance().start();
-    
-    // Start system monitoring
-    startSystemMonitoring();
-    
-    server.listen(PORT, () => {
-      console.log(`🚀 Healthcare API Server running on port ${PORT}`);
-      console.log(`📊 Dashboard available at: http://localhost:${PORT}/api/health`);
+
+      // Start system monitoring
+      startSystemMonitoring();
+
       console.log(`🔒 Advanced Security API enabled`);
       console.log(`📈 Performance monitoring active`);
       console.log(`🤖 AI Recommendation Engine enabled`);
