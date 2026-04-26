@@ -27,12 +27,14 @@ const aiRecommendationRoutes = require('./routes/aiRecommendation');
 const iotHealthMonitoringRoutes = require('./routes/iotHealthMonitoring');
 const crossPlatformIntegrationRoutes = require('./routes/crossPlatformIntegration');
 const advancedPaymentsRoutes = require('./routes/advancedPayments');
+const feeConfigRoutes = require('./routes/feeConfigs');
 const insuranceMarketplaceRoutes = require('./routes/insuranceMarketplace');
 const mlModelServingRoutes = require('./routes/mlModelServing');
 const advancedSearchRoutes = require('./routes/advancedSearch');
 const advancedNotificationsRoutes = require('./routes/advancedNotifications');
 const collaborationRoutes = require('./routes/collaboration');
-const providerRoutes = require('./routes/provider');
+const advancedReportingRoutes = require('./routes/advancedReporting');
+const advancedAnalyticsRoutes = require('./routes/advancedAnalytics');
 
 
 const { initializeDatabase } = require('./database/init');
@@ -97,12 +99,14 @@ app.use('/api/ai', authenticateToken, aiRecommendationRoutes);
 app.use('/api/iot', authenticateToken, iotHealthMonitoringRoutes);
 app.use('/api/integrations', authenticateToken, crossPlatformIntegrationRoutes);
 app.use('/api/advanced-payments', authenticateToken, advancedPaymentsRoutes);
+app.use('/api/fee-configs', authenticateToken, feeConfigRoutes);
 app.use('/api/marketplace', authenticateToken, insuranceMarketplaceRoutes);
 app.use('/api/ml', authenticateToken, mlModelServingRoutes);
 app.use('/api/search', authenticateToken, advancedSearchRoutes);
 app.use('/api/notifications', authenticateToken, advancedNotificationsRoutes);
 app.use('/api/collaboration', authenticateToken, collaborationRoutes);
-app.use('/api/providers', authenticateToken, providerRoutes);
+app.use('/api/reporting', authenticateToken, advancedReportingRoutes);
+app.use('/api/analytics', authenticateToken, advancedAnalyticsRoutes);
 
 // ── Notification system ──────────────────────────────────────────────────
 app.use('/api/notifications/preferences',  authenticateToken, notificationPreferencesRoutes);
